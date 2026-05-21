@@ -23,22 +23,34 @@ import (
 )
 
 // buildNetworkData returns the cloud-init network-config v2 YAML for the
-// VM's single data NIC. KubeVirt's cloudInitNoCloud datasource reads it
-// from the Secret key `networkdata` and applies it at the `init-local`
-// stage — before systemd-networkd starts — so the NIC has its IP, gateway
-// and DNS before any module tries to talk to the network. (A write_files
-// netplan stanza is too late: it lands during the `config` stage, after
-// `apt update` has already failed for lack of routing.)
+// VM's two NICs. KubeVirt's cloudInitNoCloud datasource reads it from
+// the Secret key `networkdata` and applies it at the `init-local`
+// stage — before systemd-networkd starts — so each NIC has its IP,
+// gateway and DNS before any module tries to talk to the network.
+// (A write_files netplan stanza is too late: it lands during the
+// `config` stage, after `apt update` has already failed for lack of
+// routing.)
 //
-// When StaticNetwork is nil the NIC runs DHCP; when set, the supplied
-// values are written as the static configuration.
+// Two interfaces:
+//   - enp1s0 (data-net): tenant client traffic. DHCP unless
+//     StaticNetwork is set, in which case the supplied address /
+//     gateway / DNS are written as static config.
+//   - enp2s0 (mgmt-net): controller-facing and the VM's first-boot
+//     egress path. Always DHCP — KubeVirt's masquerade hands out an
+//     internal address (10.0.2.0/30) from inside the launcher pod.
+//
+// Interface names rather than driver/MAC matchers: KubeVirt assigns
+// PCI slots in interface declaration order (see vmInterfaces), so
+// data → enp1s0 and mgmt → enp2s0 deterministically. Matching by
+// driver "virtio_net" would catch both NICs and apply the same config
+// to both, which is wrong.
 func buildNetworkData(p VMCreateParams) string {
 	if p.StaticNetwork == nil {
 		return `version: 2
 ethernets:
-  data:
-    match:
-      driver: virtio_net
+  enp1s0:
+    dhcp4: true
+  enp2s0:
     dhcp4: true
 `
 	}
@@ -49,9 +61,7 @@ ethernets:
 	}
 	return fmt.Sprintf(`version: 2
 ethernets:
-  data:
-    match:
-      driver: virtio_net
+  enp1s0:
     dhcp4: false
     addresses: [%s]
     routes:
@@ -59,6 +69,8 @@ ethernets:
         via: %s
     nameservers:
       addresses: [%s]%s
+  enp2s0:
+    dhcp4: true
 `,
 		ns.Address,
 		ns.Gateway,

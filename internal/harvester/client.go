@@ -68,12 +68,20 @@ var (
 
 const (
 	vmiPhaseRunning = "Running"
-	// dataNetInterface is the VM's single NIC name. It must agree in
-	// three places: the KubeVirt VM spec's `domain.devices.interfaces`,
-	// the `template.spec.networks` list, and the GetVMIReadiness
-	// preference loop that picks the right IP off the VMI status.
-	// A single source of truth here keeps them coupled.
+	// dataNetInterface is the VM's tenant-facing NIC, bridged onto the
+	// Multus NAD from spec.networkRef. Tenant clients (psql / app pods
+	// on the same VLAN) reach the DB through this interface; the
+	// published status.endpoint.address is this interface's IP.
 	dataNetInterface = "data-net"
+	// mgmtNetInterface is the VM's controller-facing NIC. It runs in
+	// KubeVirt masquerade mode on the cluster's default pod network
+	// with the Postgres port exposed via KubeVirt port-forwarding. The
+	// controller (which lives on the same pod network) dials the
+	// launcher pod's IP at this port to verify readiness — no Multus
+	// probe pod, no DHCP on the data VLAN. It also gives the VM
+	// cluster egress at first boot so `apt install` doesn't depend on
+	// the data VLAN's upstream connectivity.
+	mgmtNetInterface = "mgmt-net"
 )
 
 // Client wraps the Kubernetes dynamic client for Harvester API calls.
@@ -301,7 +309,7 @@ func (c *Client) CreatePostgresVM(ctx context.Context, p VMCreateParams) (vmName
 							map[string]any{"name": "pgdata-disk", "disk": map[string]any{"bus": "virtio"}},
 							map[string]any{"name": "cloudinit", "disk": map[string]any{"bus": "virtio"}},
 						},
-						"interfaces": vmInterfaces(),
+						"interfaces": vmInterfaces(p.Port),
 					},
 				},
 				"networks": vmNetworks(p.Namespace, p.NADName),
@@ -564,13 +572,25 @@ func (c *Client) TeardownAll(ctx context.Context, id, ns string, refs dbaasv1.Re
 // Helpers
 // ============================================================
 
-// vmInterfaces and vmNetworks describe the VM's single NIC bridged onto the
-// NAD named by spec.networkRef. Everything — client traffic, package install,
-// Prometheus scrape — flows through that one interface, so we don't add a
-// pod-network management NIC.
-func vmInterfaces() []any {
+// vmInterfaces and vmNetworks describe the VM's two NICs. They must
+// match one-for-one (same names, same order), and the order also
+// determines PCI slot assignment inside the VM:
+//
+//   - data-net (bridge on Multus NAD) → enp1s0  ─ tenant client traffic
+//   - mgmt-net (pod-network masquerade) → enp2s0 ─ controller probe + egress
+//
+// vmInterfaces takes the Postgres port so KubeVirt's port-forwarding
+// rule exposes it on the launcher pod's IP for the controller to dial.
+func vmInterfaces(port int) []any {
 	return []any{
 		map[string]any{"name": dataNetInterface, "bridge": map[string]any{}},
+		map[string]any{
+			"name":       mgmtNetInterface,
+			"masquerade": map[string]any{},
+			"ports": []any{
+				map[string]any{"port": int64(port), "protocol": "TCP"},
+			},
+		},
 	}
 }
 
@@ -583,6 +603,10 @@ func vmNetworks(namespace, nadName string) []any {
 		map[string]any{
 			"name":   dataNetInterface,
 			"multus": map[string]any{"networkName": networkName},
+		},
+		map[string]any{
+			"name": mgmtNetInterface,
+			"pod":  map[string]any{},
 		},
 	}
 }

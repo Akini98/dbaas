@@ -18,243 +18,69 @@ package harvester
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"net"
-	"strings"
 	"time"
 
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
-
-	dbaasv1 "github.com/wso2/open-cloud-datacenter/crds/dbaas/api/v1alpha1"
 )
 
-// podGVR is the GVR for the v1 Pod resource, used by the probe path.
-// Kept local to this file because the rest of the harvester client only
-// drives KubeVirt / CDI / monitoring resources.
+// podGVR is the GVR for the v1 Pod resource, used to find the
+// virt-launcher pod that backs a VirtualMachineInstance.
 var podGVR = schema.GroupVersionResource{Group: "", Version: "v1", Resource: "pods"}
 
-const (
-	// probeImage is small (~5 MB) and ships nc, ip, and udhcpc in a single
-	// binary, which is exactly what the probe script needs.
-	probeImage = "busybox:1.36"
+// dialTimeout is how long a single TCP-connect attempt waits for SYN-ACK
+// before being declared failed. Short on purpose: the controller's
+// reconcile loop will retry, and a long block here would stall every
+// reconcile that touches a still-booting VM.
+const dialTimeout = 3 * time.Second
 
-	// probeNicName is the local-to-the-pod name of the secondary NIC that
-	// Multus attaches. It must match the "interface" key in the multus
-	// annotation and the `dev` arg in the probe script.
-	probeNicName = "probe-nic"
-
-	probeContainerName  = "probe"
-	probeTimeoutSeconds = 20
-	probePollInterval   = 1 * time.Second
-)
-
-// ProbeVMListener tests whether the VM at vmIP is accepting TCP on `port`.
-// It spawns an ephemeral Pod attached to the same Multus
-// NetworkAttachmentDefinition the VM uses, runs nc from there, and reads
-// the Pod's exit phase. Returns nil if nc succeeded, a non-nil error
-// otherwise.
+// DialVMListener confirms PostgreSQL inside the VM is accepting TCP
+// connections by dialing the launcher pod's pod-network IP at the
+// configured Postgres port.
 //
-// Why a Pod and not net.DialTimeout from inside the controller: the
-// controller almost always runs on the cluster pod overlay, which has no
-// L3 route to the data VLAN the VM lives on. A Pod attached to the same
-// NAD shares the VM's L2 segment and can dial directly without any
-// host-level routing tricks.
+// This works because every DB VM (see vmInterfaces) has a second NIC,
+// mgmt-net, running in KubeVirt masquerade mode on the cluster's pod
+// network with the Postgres port exposed via KubeVirt port-forwarding.
+// The launcher pod's IP is reachable from any other pod in the cluster,
+// including the dbaas controller — so the check is just a single
+// net.DialTimeout, with no probe Pod, no Multus dance, and no
+// dependency on DHCP being present on the data VLAN.
 //
-// Concurrency / IP-collision caveats are tracked in DEFERRED.md (DEF-21).
-func (c *Client) ProbeVMListener(
-	ctx context.Context,
-	ns, vmName, nadRef, vmIP string,
-	port int,
-	staticNet *dbaasv1.NetworkConfig,
-) error {
-	nadName, nadNs := parseNADRef(nadRef, ns)
-
-	netAnno, err := json.Marshal([]map[string]string{{
-		"name":      nadName,
-		"namespace": nadNs,
-		"interface": probeNicName,
-	}})
-	if err != nil {
-		return fmt.Errorf("marshal multus annotation: %w", err)
-	}
-
-	script, err := probeScript(vmIP, port, staticNet)
-	if err != nil {
-		return fmt.Errorf("build probe script: %w", err)
-	}
-
-	podName := probePodName(vmName)
-	pod := &unstructured.Unstructured{
-		Object: map[string]any{
-			"apiVersion": "v1",
-			"kind":       "Pod",
-			"metadata": map[string]any{
-				"name":      podName,
-				"namespace": ns,
-				"annotations": map[string]any{
-					"k8s.v1.cni.cncf.io/networks": string(netAnno),
-				},
-				"labels": map[string]any{
-					dbaasv1.LabelInstance: vmName,
-					dbaasv1.LabelRole:     "probe",
-				},
-			},
-			"spec": map[string]any{
-				"restartPolicy":         "Never",
-				"activeDeadlineSeconds": int64(probeTimeoutSeconds),
-				"containers": []any{
-					map[string]any{
-						"name":    probeContainerName,
-						"image":   probeImage,
-						"command": []any{"sh", "-c", script},
-						"securityContext": map[string]any{
-							"capabilities": map[string]any{
-								// Needed for `ip addr add`. Without it the
-								// secondary NIC stays unaddressed and nc has
-								// no source IP for the dial.
-								"add": []any{"NET_ADMIN"},
-							},
-						},
-					},
-				},
-			},
-		},
-	}
-
+// Returns nil on a successful TCP handshake. Any other outcome (no
+// running launcher pod, no podIP yet, connection refused, timeout) is
+// returned as an error so the reconciler treats it as "not ready yet,
+// retry next reconcile".
+func (c *Client) DialVMListener(ctx context.Context, ns, vmName string, port int) error {
 	pods := c.Dynamic.Resource(podGVR).Namespace(ns)
-	zero := int64(0)
-	deleteOpts := metav1.DeleteOptions{GracePeriodSeconds: &zero}
+	list, err := pods.List(ctx, metav1.ListOptions{
+		LabelSelector: fmt.Sprintf("vm.kubevirt.io/name=%s", vmName),
+	})
+	if err != nil {
+		return fmt.Errorf("list launcher pods for %s: %w", vmName, err)
+	}
 
-	// Always best-effort delete on exit. Detached ctx so a cancelled parent
-	// (e.g. reconciler timed out) doesn't leave the pod behind.
-	defer func() { _ = pods.Delete(context.Background(), podName, deleteOpts) }()
-
-	// Clean any stale pod from a previous reconcile attempt before
-	// (re-)creating. We poll for actual disappearance because Delete only
-	// initiates termination.
-	_ = pods.Delete(ctx, podName, deleteOpts)
-	for range 25 {
-		if _, gerr := pods.Get(ctx, podName, metav1.GetOptions{}); apierrors.IsNotFound(gerr) {
+	podIP := ""
+	for _, p := range list.Items {
+		phase, _, _ := unstructured.NestedString(p.Object, "status", "phase")
+		ip, _, _ := unstructured.NestedString(p.Object, "status", "podIP")
+		if phase == "Running" && ip != "" {
+			podIP = ip
 			break
 		}
-		time.Sleep(200 * time.Millisecond)
+	}
+	if podIP == "" {
+		return fmt.Errorf("no Running launcher pod with podIP for VM %s", vmName)
 	}
 
-	if _, err := pods.Create(ctx, pod, metav1.CreateOptions{}); err != nil {
-		return fmt.Errorf("create probe pod: %w", err)
-	}
-
-	deadline := time.Now().Add(time.Duration(probeTimeoutSeconds) * time.Second)
-	for time.Now().Before(deadline) {
-		time.Sleep(probePollInterval)
-		cur, err := pods.Get(ctx, podName, metav1.GetOptions{})
-		if err != nil {
-			continue
-		}
-		phase, _, _ := unstructured.NestedString(cur.Object, "status", "phase")
-		switch phase {
-		case "Succeeded":
-			return nil
-		case "Failed":
-			return fmt.Errorf("probe pod failed: %s", probeFailureDetail(cur))
-		}
-	}
-	return fmt.Errorf("probe pod %s did not complete within %ds",
-		podName, probeTimeoutSeconds)
-}
-
-// probePodName returns a stable name. Stable so that overlapping reconciles
-// for the same DBInstance collapse to a single in-flight probe pod rather
-// than spamming the API server with one-shot pods.
-func probePodName(vmName string) string {
-	return fmt.Sprintf("dbaas-probe-%s", vmName)
-}
-
-// probeFailureDetail digs the container's terminated state out of the pod
-// status so the controller's status message names a useful reason.
-func probeFailureDetail(pod *unstructured.Unstructured) string {
-	cs, _, _ := unstructured.NestedSlice(pod.Object, "status", "containerStatuses")
-	for _, c := range cs {
-		cm, _ := c.(map[string]any)
-		if cm == nil {
-			continue
-		}
-		term, _, _ := unstructured.NestedMap(cm, "state", "terminated")
-		if term == nil {
-			continue
-		}
-		code, _, _ := unstructured.NestedInt64(term, "exitCode")
-		reason, _, _ := unstructured.NestedString(term, "reason")
-		return fmt.Sprintf("exitCode=%d reason=%s", code, reason)
-	}
-	return "no container terminated state"
-}
-
-// parseNADRef parses the spec.networkRef format. Accepts either
-// "namespace/name" or just "name"; in the latter case the DBInstance's
-// own namespace is used.
-func parseNADRef(ref, defaultNs string) (name, ns string) {
-	if i := strings.LastIndex(ref, "/"); i > 0 {
-		return ref[i+1:], ref[:i]
-	}
-	return ref, defaultNs
-}
-
-// probeScript builds the shell snippet run inside the probe pod. The pod
-// boots with the multus secondary NIC up but unaddressed (the NAD has no
-// IPAM); the script assigns an IP, then runs nc with a tight timeout.
-func probeScript(vmIP string, port int, staticNet *dbaasv1.NetworkConfig) (string, error) {
-	var setIP string
-	if staticNet != nil {
-		probeIP, prefix, err := neighborIP(vmIP, staticNet.Address)
-		if err != nil {
-			return "", err
-		}
-		setIP = fmt.Sprintf("ip link set %s up && ip addr add %s/%d dev %s",
-			probeNicName, probeIP, prefix, probeNicName)
-	} else {
-		// DHCP path: the operator chose not to pin a static address, so
-		// the VLAN presumably has DHCP. udhcpc grabs a lease for the probe.
-		setIP = fmt.Sprintf("ip link set %s up && udhcpc -i %s -nq -t 3 -T 1 -f",
-			probeNicName, probeNicName)
-	}
-	// chained with && so a failed IP setup short-circuits and the pod
-	// exits non-zero, which the controller treats as "not ready, retry".
-	return fmt.Sprintf("%s && nc -zvw 3 %s %d", setIP, vmIP, port), nil
-}
-
-// neighborIP picks an IP one octet away from the VM's address on the same
-// subnet. This avoids needing IPAM in the NAD and keeps the probe pod
-// trivially correlated with its target. Concurrent probes for sibling
-// VMs whose addresses differ by exactly one are the documented collision
-// case (DEF-21).
-func neighborIP(vmIP, vmCIDR string) (string, int, error) {
-	_, ipNet, err := net.ParseCIDR(vmCIDR)
+	addr := fmt.Sprintf("%s:%d", podIP, port)
+	d := net.Dialer{Timeout: dialTimeout}
+	conn, err := d.DialContext(ctx, "tcp", addr)
 	if err != nil {
-		return "", 0, fmt.Errorf("parse staticNetwork.Address %q: %w", vmCIDR, err)
+		return fmt.Errorf("dial %s: %w", addr, err)
 	}
-	parsed := net.ParseIP(vmIP).To4()
-	if parsed == nil {
-		return "", 0, fmt.Errorf("vmIP %q is not an IPv4 address", vmIP)
-	}
-
-	candidate := make(net.IP, 4)
-	copy(candidate, parsed)
-	// Prefer +1, fall back to -1 when the VM is at the broadcast-adjacent
-	// edge of /24-style ranges. Stays an IPv4 byte arithmetic.
-	if parsed[3] < 254 {
-		candidate[3]++
-	} else {
-		candidate[3]--
-	}
-	if !ipNet.Contains(candidate) {
-		return "", 0, fmt.Errorf("derived probe IP %s outside subnet %s",
-			candidate, ipNet)
-	}
-	prefix, _ := ipNet.Mask.Size()
-	return candidate.String(), prefix, nil
+	_ = conn.Close()
+	return nil
 }

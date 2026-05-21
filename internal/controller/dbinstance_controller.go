@@ -36,9 +36,9 @@ import (
 
 // probeListener is the function phaseWaitReady calls to confirm postgres
 // is actually accepting TCP before marking the instance DatabaseReady.
-// Package-level var so tests can stub it without running real Pods.
-var probeListener = func(c *harvester.Client, ctx context.Context, ns, vmName, nadRef, ip string, port int, sn *dbaasv1.NetworkConfig) error {
-	return c.ProbeVMListener(ctx, ns, vmName, nadRef, ip, port, sn)
+// Package-level var so tests can stub it without doing real network I/O.
+var probeListener = func(c *harvester.Client, ctx context.Context, ns, vmName string, port int) error {
+	return c.DialVMListener(ctx, ns, vmName, port)
 }
 
 // Controller-side defaults for fields the user can leave blank on the
@@ -302,13 +302,13 @@ func (r *DBInstanceReconciler) phaseWaitReady(ctx context.Context, inst *dbaasv1
 	// admin role. A pure VMI-readiness gate has previously let a broken
 	// postgres slip through as "available".
 	//
-	// The probe runs from a one-shot Pod attached to the same Multus NAD
-	// as the VM (see harvester.ProbeVMListener for why). TCP-only — not a
-	// SQL ping — keeps the controller free of a DB driver dependency;
-	// postgres opens its listener only when it is genuinely ready to
-	// accept SQL, so a successful dial is a sufficient signal.
-	if derr := probeListener(r.Harvester, ctx, ns, inst.Status.Resources.VMName,
-		inst.Status.Resources.NADName, readiness.IP, port, inst.Spec.StaticNetwork); derr != nil {
+	// The probe is a net.DialTimeout from inside the controller process
+	// against the VM's mgmt-net pod-network IP (see harvester.DialVMListener
+	// for why). TCP-only — not a SQL ping — keeps the controller free of
+	// a DB driver dependency; postgres opens its listener only when it
+	// is genuinely ready to accept SQL, so a successful dial is a
+	// sufficient signal.
+	if derr := probeListener(r.Harvester, ctx, ns, inst.Status.Resources.VMName, port); derr != nil {
 		inst.Status.Message = fmt.Sprintf("Waiting for PostgreSQL listener at %s:%d: %v",
 			readiness.IP, port, derr)
 		inst.Status.ProvisioningPhase = dbaasv1.PhaseWaitingForCloudInit
