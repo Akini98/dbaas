@@ -89,34 +89,34 @@ func (c *Client) ProbeVMListener(
 
 	podName := probePodName(vmName)
 	pod := &unstructured.Unstructured{
-		Object: map[string]interface{}{
+		Object: map[string]any{
 			"apiVersion": "v1",
 			"kind":       "Pod",
-			"metadata": map[string]interface{}{
+			"metadata": map[string]any{
 				"name":      podName,
 				"namespace": ns,
-				"annotations": map[string]interface{}{
+				"annotations": map[string]any{
 					"k8s.v1.cni.cncf.io/networks": string(netAnno),
 				},
-				"labels": map[string]interface{}{
+				"labels": map[string]any{
 					dbaasv1.LabelInstance: vmName,
 					dbaasv1.LabelRole:     "probe",
 				},
 			},
-			"spec": map[string]interface{}{
+			"spec": map[string]any{
 				"restartPolicy":         "Never",
 				"activeDeadlineSeconds": int64(probeTimeoutSeconds),
-				"containers": []interface{}{
-					map[string]interface{}{
+				"containers": []any{
+					map[string]any{
 						"name":    probeContainerName,
 						"image":   probeImage,
-						"command": []interface{}{"sh", "-c", script},
-						"securityContext": map[string]interface{}{
-							"capabilities": map[string]interface{}{
+						"command": []any{"sh", "-c", script},
+						"securityContext": map[string]any{
+							"capabilities": map[string]any{
 								// Needed for `ip addr add`. Without it the
 								// secondary NIC stays unaddressed and nc has
 								// no source IP for the dial.
-								"add": []interface{}{"NET_ADMIN"},
+								"add": []any{"NET_ADMIN"},
 							},
 						},
 					},
@@ -179,7 +179,7 @@ func probePodName(vmName string) string {
 func probeFailureDetail(pod *unstructured.Unstructured) string {
 	cs, _, _ := unstructured.NestedSlice(pod.Object, "status", "containerStatuses")
 	for _, c := range cs {
-		cm, _ := c.(map[string]interface{})
+		cm, _ := c.(map[string]any)
 		if cm == nil {
 			continue
 		}

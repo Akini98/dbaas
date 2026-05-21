@@ -64,9 +64,9 @@ func TestDeployMonitoringIsIdempotent(t *testing.T) {
 	if err != nil || !found || len(subsets) != 1 {
 		t.Fatalf("Endpoint subsets = %v, found=%t, err=%v", subsets, found, err)
 	}
-	subset := subsets[0].(map[string]interface{})
-	addresses := subset["addresses"].([]interface{})
-	address := addresses[0].(map[string]interface{})
+	subset := subsets[0].(map[string]any)
+	addresses := subset["addresses"].([]any)
+	address := addresses[0].(map[string]any)
 	if address["ip"] != "192.168.40.50" {
 		t.Fatalf("Endpoint IP = %v, want 192.168.40.50", address["ip"])
 	}
