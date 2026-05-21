@@ -197,7 +197,7 @@ func (s *Server) handleCreateInstance(w http.ResponseWriter, r *http.Request) {
 	if c == nil {
 		return
 	}
-	defer r.Body.Close()
+	defer func() { _ = r.Body.Close() }()
 
 	var instance dbaasv1.DBInstance
 	if err := json.NewDecoder(r.Body).Decode(&instance); err != nil {
@@ -301,7 +301,7 @@ func (s *Server) handleModifyInstance(w http.ResponseWriter, r *http.Request, na
 	if c == nil {
 		return
 	}
-	defer r.Body.Close()
+	defer func() { _ = r.Body.Close() }()
 
 	var req modifyRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -386,7 +386,7 @@ func writeError(w http.ResponseWriter, status int, message string) {
 	writeJSON(w, status, map[string]string{"error": message})
 }
 
-func writeJSON(w http.ResponseWriter, status int, payload interface{}) {
+func writeJSON(w http.ResponseWriter, status int, payload any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(payload)

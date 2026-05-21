@@ -127,7 +127,7 @@ func (c *Client) CreateDataVolume(ctx context.Context, id, ns string, sizeGB int
 	dv := newUnstructured("cdi.kubevirt.io/v1beta1", "DataVolume", dvName, ns)
 	dv.SetLabels(map[string]string{dbaasv1.LabelInstance: id, dbaasv1.LabelRole: "pgdata"})
 
-	_ = unstructured.SetNestedMap(dv.Object, map[string]interface{}{}, "spec", "source", "blank")
+	_ = unstructured.SetNestedMap(dv.Object, map[string]any{}, "spec", "source", "blank")
 	_ = unstructured.SetNestedStringSlice(dv.Object, []string{"ReadWriteOnce"}, "spec", "pvc", "accessModes")
 	_ = unstructured.SetNestedField(dv.Object, "Block", "spec", "pvc", "volumeMode")
 	_ = unstructured.SetNestedField(dv.Object, fmt.Sprintf("%dGi", sizeGB), "spec", "pvc", "resources", "requests", "storage")
@@ -176,16 +176,16 @@ func (c *Client) resolveVMImage(ctx context.Context, ref string) (ns, name, sc s
 		if sc == "" {
 			err = fmt.Errorf("VirtualMachineImage %s/%s has no status.storageClassName yet (image not ready)", ns, name)
 		}
-		return
+		return ns, name, sc, err
 	} else if !apierrors.IsNotFound(e) {
 		err = e
-		return
+		return ns, name, sc, err
 	}
 
 	list, e := c.Dynamic.Resource(vmImageGVR).Namespace(ns).List(ctx, metav1.ListOptions{})
 	if e != nil {
 		err = e
-		return
+		return ns, name, sc, err
 	}
 	for _, item := range list.Items {
 		dn, _, _ := unstructured.NestedString(item.Object, "spec", "displayName")
@@ -195,11 +195,11 @@ func (c *Client) resolveVMImage(ctx context.Context, ref string) (ns, name, sc s
 			if sc == "" {
 				err = fmt.Errorf("VirtualMachineImage %s/%s (displayName=%s) has no status.storageClassName yet", ns, name, spec)
 			}
-			return
+			return ns, name, sc, err
 		}
 	}
 	err = fmt.Errorf("no VirtualMachineImage in namespace %s matching name or displayName %q", ns, spec)
-	return
+	return ns, name, sc, err
 }
 
 func (c *Client) CreatePostgresVM(ctx context.Context, p VMCreateParams) (vmName, secretName, caCertPEM string, err error) {
@@ -216,7 +216,7 @@ func (c *Client) CreatePostgresVM(ctx context.Context, p VMCreateParams) (vmName
 	tls, tlsErr := generateTLS(vmName)
 	if tlsErr != nil {
 		err = fmt.Errorf("TLS generation: %w", tlsErr)
-		return
+		return vmName, secretName, caCertPEM, err
 	}
 	caCertPEM = tls.CACertPEM
 
@@ -231,7 +231,7 @@ func (c *Client) CreatePostgresVM(ctx context.Context, p VMCreateParams) (vmName
 	networkData := buildNetworkData(p)
 	secret := newUnstructured("v1", "Secret", secretName, p.Namespace)
 	_ = unstructured.SetNestedField(secret.Object, "Opaque", "type")
-	_ = unstructured.SetNestedField(secret.Object, map[string]interface{}{
+	_ = unstructured.SetNestedField(secret.Object, map[string]any{
 		"admin_user":        p.MasterUser,
 		"admin_password":    adminPw,
 		"repl_password":     replPw,
@@ -245,7 +245,7 @@ func (c *Client) CreatePostgresVM(ctx context.Context, p VMCreateParams) (vmName
 	}, "stringData")
 	if _, e := c.Dynamic.Resource(secretGVR).Namespace(p.Namespace).Create(ctx, secret, metav1.CreateOptions{}); e != nil {
 		if err = ignoreAlreadyExists(e); err != nil {
-			return
+			return vmName, secretName, caCertPEM, err
 		}
 	}
 
@@ -253,61 +253,61 @@ func (c *Client) CreatePostgresVM(ctx context.Context, p VMCreateParams) (vmName
 	// the image-managed StorageClass (no cross-namespace PVC clone, no extra RBAC).
 	imgNs, imgName, imgSC, err := c.resolveVMImage(ctx, p.OSImage)
 	if err != nil {
-		return
+		return vmName, secretName, caCertPEM, err
 	}
 
 	// Build VirtualMachine CR
 	vm := newUnstructured("kubevirt.io/v1", "VirtualMachine", vmName, p.Namespace)
 	vm.SetLabels(map[string]string{dbaasv1.LabelInstance: p.ID, dbaasv1.LabelRole: "primary"})
 
-	spec := map[string]interface{}{
+	spec := map[string]any{
 		"running": true,
-		"dataVolumeTemplates": []interface{}{
-			map[string]interface{}{
+		"dataVolumeTemplates": []any{
+			map[string]any{
 				"apiVersion": "cdi.kubevirt.io/v1beta1",
 				"kind":       "DataVolume",
-				"metadata": map[string]interface{}{
+				"metadata": map[string]any{
 					"name": fmt.Sprintf("pg-%s-os", p.ID),
-					"annotations": map[string]interface{}{
+					"annotations": map[string]any{
 						"harvesterhci.io/imageId": fmt.Sprintf("%s/%s", imgNs, imgName),
 					},
 				},
-				"spec": map[string]interface{}{
-					"source": map[string]interface{}{
-						"blank": map[string]interface{}{},
+				"spec": map[string]any{
+					"source": map[string]any{
+						"blank": map[string]any{},
 					},
-					"pvc": map[string]interface{}{
-						"accessModes":      []interface{}{"ReadWriteMany"},
+					"pvc": map[string]any{
+						"accessModes":      []any{"ReadWriteMany"},
 						"volumeMode":       "Block",
 						"storageClassName": imgSC,
-						"resources": map[string]interface{}{
-							"requests": map[string]interface{}{"storage": "20Gi"},
+						"resources": map[string]any{
+							"requests": map[string]any{"storage": "20Gi"},
 						},
 					},
 				},
 			},
 		},
-		"template": map[string]interface{}{
-			"metadata": map[string]interface{}{
-				"labels": map[string]interface{}{dbaasv1.LabelInstance: p.ID},
+		"template": map[string]any{
+			"metadata": map[string]any{
+				"labels": map[string]any{dbaasv1.LabelInstance: p.ID},
 			},
-			"spec": map[string]interface{}{
-				"domain": map[string]interface{}{
-					"cpu":    map[string]interface{}{"cores": int64(p.CPUCores), "sockets": int64(1), "threads": int64(1)},
-					"memory": map[string]interface{}{"guest": fmt.Sprintf("%dMi", p.MemoryMB)},
-					"devices": map[string]interface{}{
-						"disks": []interface{}{
-							map[string]interface{}{"name": "os-disk", "disk": map[string]interface{}{"bus": "virtio"}, "bootOrder": int64(1)},
-							map[string]interface{}{"name": "pgdata-disk", "disk": map[string]interface{}{"bus": "virtio"}},
-							map[string]interface{}{"name": "cloudinit", "disk": map[string]interface{}{"bus": "virtio"}},
+			"spec": map[string]any{
+				"domain": map[string]any{
+					"cpu":    map[string]any{"cores": int64(p.CPUCores), "sockets": int64(1), "threads": int64(1)},
+					"memory": map[string]any{"guest": fmt.Sprintf("%dMi", p.MemoryMB)},
+					"devices": map[string]any{
+						"disks": []any{
+							map[string]any{"name": "os-disk", "disk": map[string]any{"bus": "virtio"}, "bootOrder": int64(1)},
+							map[string]any{"name": "pgdata-disk", "disk": map[string]any{"bus": "virtio"}},
+							map[string]any{"name": "cloudinit", "disk": map[string]any{"bus": "virtio"}},
 						},
 						"interfaces": vmInterfaces(),
 					},
 				},
 				"networks": vmNetworks(p.Namespace, p.NADName),
-				"volumes": []interface{}{
-					map[string]interface{}{"name": "os-disk", "dataVolume": map[string]interface{}{"name": fmt.Sprintf("pg-%s-os", p.ID)}},
-					map[string]interface{}{"name": "pgdata-disk", "dataVolume": map[string]interface{}{"name": p.DataVolumeRef}},
+				"volumes": []any{
+					map[string]any{"name": "os-disk", "dataVolume": map[string]any{"name": fmt.Sprintf("pg-%s-os", p.ID)}},
+					map[string]any{"name": "pgdata-disk", "dataVolume": map[string]any{"name": p.DataVolumeRef}},
 					// Harvester's VM mutating webhook silently strips the
 					// newer `userDataSecretRef` field while leaving
 					// `networkDataSecretRef` intact — the VM ends up with
@@ -317,9 +317,9 @@ func (c *Client) CreatePostgresVM(ctx context.Context, p VMCreateParams) (vmName
 					// Harvester recognises) for the userdata key, plus
 					// `networkDataSecretRef` for the networkdata key. Both
 					// point at the same Secret.
-					map[string]interface{}{"name": "cloudinit", "cloudInitNoCloud": map[string]interface{}{
-						"secretRef":            map[string]interface{}{"name": secretName},
-						"networkDataSecretRef": map[string]interface{}{"name": secretName},
+					map[string]any{"name": "cloudinit", "cloudInitNoCloud": map[string]any{
+						"secretRef":            map[string]any{"name": secretName},
+						"networkDataSecretRef": map[string]any{"name": secretName},
 					}},
 				},
 			},
@@ -330,7 +330,7 @@ func (c *Client) CreatePostgresVM(ctx context.Context, p VMCreateParams) (vmName
 	if _, e := c.Dynamic.Resource(vmGVR).Namespace(p.Namespace).Create(ctx, vm, metav1.CreateOptions{}); e != nil {
 		err = ignoreAlreadyExists(e)
 	}
-	return // vmName, secretName, caCertPEM, err all set via named returns
+	return vmName, secretName, caCertPEM, err
 }
 
 // GetVMIReadiness fetches the VMI once and returns phase, IP, and postgres-readiness.
@@ -350,7 +350,7 @@ func (c *Client) GetVMIReadiness(ctx context.Context, ns, vmName string) (VMIRea
 	// data-net explicitly; fall back to the first address if not found.
 	var fallbackIP string
 	for _, iface := range interfaces {
-		ifMap, ok := iface.(map[string]interface{})
+		ifMap, ok := iface.(map[string]any)
 		if !ok {
 			continue
 		}
@@ -441,7 +441,7 @@ func (c *Client) DeployMonitoring(ctx context.Context, id, ns, vmIP string) (svc
 	promTarget = fmt.Sprintf("%s.%s.svc:9187", svcName, ns)
 	if vmIP == "" {
 		err = fmt.Errorf("monitoring endpoint IP is required")
-		return
+		return svcName, smName, grafanaURL, promTarget, err
 	}
 
 	// Headless service. Do not use a selector: the KubeVirt virt-launcher pod
@@ -451,20 +451,20 @@ func (c *Client) DeployMonitoring(ctx context.Context, id, ns, vmIP string) (svc
 	svc.SetLabels(map[string]string{dbaasv1.LabelInstance: id, dbaasv1.LabelMetrics: "true"})
 	_ = unstructured.SetNestedField(svc.Object, "ClusterIP", "spec", "type")
 	_ = unstructured.SetNestedField(svc.Object, "None", "spec", "clusterIP")
-	_ = unstructured.SetNestedSlice(svc.Object, []interface{}{
-		map[string]interface{}{"name": "metrics", "port": int64(9187), "targetPort": int64(9187), "protocol": "TCP"},
+	_ = unstructured.SetNestedSlice(svc.Object, []any{
+		map[string]any{"name": "metrics", "port": int64(9187), "targetPort": int64(9187), "protocol": "TCP"},
 	}, "spec", "ports")
 	unstructured.RemoveNestedField(svc.Object, "spec", "selector")
 	if err = c.createOrUpdate(ctx, serviceGVR, ns, svc, func(existing *unstructured.Unstructured) {
 		existing.SetLabels(svc.GetLabels())
 		_ = unstructured.SetNestedField(existing.Object, "ClusterIP", "spec", "type")
 		_ = unstructured.SetNestedField(existing.Object, "None", "spec", "clusterIP")
-		_ = unstructured.SetNestedSlice(existing.Object, []interface{}{
-			map[string]interface{}{"name": "metrics", "port": int64(9187), "targetPort": int64(9187), "protocol": "TCP"},
+		_ = unstructured.SetNestedSlice(existing.Object, []any{
+			map[string]any{"name": "metrics", "port": int64(9187), "targetPort": int64(9187), "protocol": "TCP"},
 		}, "spec", "ports")
 		unstructured.RemoveNestedField(existing.Object, "spec", "selector")
 	}); err != nil {
-		return
+		return svcName, smName, grafanaURL, promTarget, err
 	}
 
 	ep := newUnstructured("v1", "Endpoints", svcName, ns)
@@ -474,29 +474,29 @@ func (c *Client) DeployMonitoring(ctx context.Context, id, ns, vmIP string) (svc
 		existing.SetLabels(ep.GetLabels())
 		_ = unstructured.SetNestedSlice(existing.Object, monitoringEndpointSubsets(vmIP), "subsets")
 	}); err != nil {
-		return
+		return svcName, smName, grafanaURL, promTarget, err
 	}
 
 	// ServiceMonitor
 	sm := newUnstructured("monitoring.coreos.com/v1", "ServiceMonitor", smName, ns)
 	sm.SetLabels(map[string]string{dbaasv1.LabelInstance: id, "release": "prometheus"})
-	_ = unstructured.SetNestedField(sm.Object, map[string]interface{}{
-		"matchLabels": map[string]interface{}{dbaasv1.LabelMetrics: "true", dbaasv1.LabelInstance: id},
+	_ = unstructured.SetNestedField(sm.Object, map[string]any{
+		"matchLabels": map[string]any{dbaasv1.LabelMetrics: "true", dbaasv1.LabelInstance: id},
 	}, "spec", "selector")
-	_ = unstructured.SetNestedSlice(sm.Object, []interface{}{
-		map[string]interface{}{"port": "metrics", "interval": "15s", "path": "/metrics"},
+	_ = unstructured.SetNestedSlice(sm.Object, []any{
+		map[string]any{"port": "metrics", "interval": "15s", "path": "/metrics"},
 	}, "spec", "endpoints")
 	err = c.createOrUpdate(ctx, smGVR, ns, sm, func(existing *unstructured.Unstructured) {
 		existing.SetLabels(sm.GetLabels())
-		_ = unstructured.SetNestedField(existing.Object, map[string]interface{}{
-			"matchLabels": map[string]interface{}{dbaasv1.LabelMetrics: "true", dbaasv1.LabelInstance: id},
+		_ = unstructured.SetNestedField(existing.Object, map[string]any{
+			"matchLabels": map[string]any{dbaasv1.LabelMetrics: "true", dbaasv1.LabelInstance: id},
 		}, "spec", "selector")
-		_ = unstructured.SetNestedSlice(existing.Object, []interface{}{
-			map[string]interface{}{"port": "metrics", "interval": "15s", "path": "/metrics"},
+		_ = unstructured.SetNestedSlice(existing.Object, []any{
+			map[string]any{"port": "metrics", "interval": "15s", "path": "/metrics"},
 		}, "spec", "endpoints")
 	})
 
-	return
+	return svcName, smName, grafanaURL, promTarget, err
 }
 
 // ============================================================
@@ -568,30 +568,30 @@ func (c *Client) TeardownAll(ctx context.Context, id, ns string, refs dbaasv1.Re
 // NAD named by spec.networkRef. Everything — client traffic, package install,
 // Prometheus scrape — flows through that one interface, so we don't add a
 // pod-network management NIC.
-func vmInterfaces() []interface{} {
-	return []interface{}{
-		map[string]interface{}{"name": dataNetInterface, "bridge": map[string]interface{}{}},
+func vmInterfaces() []any {
+	return []any{
+		map[string]any{"name": dataNetInterface, "bridge": map[string]any{}},
 	}
 }
 
-func vmNetworks(namespace, nadName string) []interface{} {
+func vmNetworks(namespace, nadName string) []any {
 	networkName := nadName
 	if !strings.Contains(nadName, "/") {
 		networkName = fmt.Sprintf("%s/%s", namespace, nadName)
 	}
-	return []interface{}{
-		map[string]interface{}{
+	return []any{
+		map[string]any{
 			"name":   dataNetInterface,
-			"multus": map[string]interface{}{"networkName": networkName},
+			"multus": map[string]any{"networkName": networkName},
 		},
 	}
 }
 
 func newUnstructured(apiVersion, kind, name, namespace string) *unstructured.Unstructured {
-	obj := &unstructured.Unstructured{Object: map[string]interface{}{
+	obj := &unstructured.Unstructured{Object: map[string]any{
 		"apiVersion": apiVersion,
 		"kind":       kind,
-		"metadata": map[string]interface{}{
+		"metadata": map[string]any{
 			"name": name,
 		},
 	}}
@@ -616,14 +616,14 @@ func (c *Client) createOrUpdate(ctx context.Context, gvr schema.GroupVersionReso
 	return err
 }
 
-func monitoringEndpointSubsets(vmIP string) []interface{} {
-	return []interface{}{
-		map[string]interface{}{
-			"addresses": []interface{}{
-				map[string]interface{}{"ip": vmIP},
+func monitoringEndpointSubsets(vmIP string) []any {
+	return []any{
+		map[string]any{
+			"addresses": []any{
+				map[string]any{"ip": vmIP},
 			},
-			"ports": []interface{}{
-				map[string]interface{}{"name": "metrics", "port": int64(9187), "protocol": "TCP"},
+			"ports": []any{
+				map[string]any{"name": "metrics", "port": int64(9187), "protocol": "TCP"},
 			},
 		},
 	}

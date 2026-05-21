@@ -206,14 +206,14 @@ ssh_pwauth: true
       DO \$\$
       BEGIN
         IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '${MASTER_USER}') THEN
-          CREATE ROLE ${MASTER_USER} LOGIN CREATEDB CREATEROLE PASSWORD '${MASTER_PASSWORD}';
+          CREATE ROLE "${MASTER_USER}" LOGIN CREATEDB CREATEROLE PASSWORD '${MASTER_PASSWORD}';
         END IF;
         IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'postgres_exporter') THEN
           CREATE ROLE postgres_exporter LOGIN PASSWORD '${EXPORTER_PASSWORD}';
         END IF;
       END \$\$;
       GRANT pg_monitor TO postgres_exporter;
-      SELECT 'CREATE DATABASE ${DB_NAME} OWNER ${MASTER_USER}'
+      SELECT 'CREATE DATABASE "${DB_NAME}" OWNER "${MASTER_USER}"'
         WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = '${DB_NAME}')\gexec
       EOSQL
 

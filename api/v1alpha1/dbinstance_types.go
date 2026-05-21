@@ -48,8 +48,15 @@ type DBInstanceSpec struct {
 	EngineVersion string `json:"engineVersion,omitempty"`
 
 	// DBName is the initial database to create. Default: the instance name.
+	// Must follow PostgreSQL identifier rules: start with a letter or
+	// underscore, contain only letters, digits, underscores, or "$",
+	// max 63 characters. The reconciler also double-quotes this identifier
+	// when emitting CREATE DATABASE; the regex catches invalid values at
+	// apply time so failures don't appear later inside cloud-init.
 	// Immutable after first reconcile; modify is refused.
 	// +optional
+	// +kubebuilder:validation:MaxLength=63
+	// +kubebuilder:validation:Pattern=`^[a-zA-Z_][a-zA-Z0-9_$]{0,62}$`
 	DBName string `json:"dbName,omitempty"`
 
 	// Port for PostgreSQL. Default 5432.
@@ -60,8 +67,15 @@ type DBInstanceSpec struct {
 	Port int `json:"port,omitempty"`
 
 	// MasterUsername for the admin user. Default "dbadmin".
+	// Must follow PostgreSQL identifier rules: start with a letter or
+	// underscore, contain only letters, digits, underscores, or "$",
+	// max 63 characters. The reconciler also double-quotes this identifier
+	// when emitting CREATE ROLE; the regex catches invalid values at
+	// apply time so failures don't appear later inside cloud-init.
 	// Immutable after first reconcile.
 	// +optional
+	// +kubebuilder:validation:MaxLength=63
+	// +kubebuilder:validation:Pattern=`^[a-zA-Z_][a-zA-Z0-9_$]{0,62}$`
 	MasterUsername string `json:"masterUsername,omitempty"`
 
 	// ManageMasterUserPassword: if true, auto-generate the admin password

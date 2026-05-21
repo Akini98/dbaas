@@ -29,7 +29,7 @@ import (
 func TestDeployMonitoringIsIdempotent(t *testing.T) {
 	client := NewClient(fake.NewSimpleDynamicClient(runtime.NewScheme()), "https://grafana.example")
 
-	for i := 0; i < 2; i++ {
+	for i := range 2 {
 		svcName, smName, grafanaURL, promTarget, err := client.DeployMonitoring(context.Background(), "orders", "tenant-a", "192.168.40.50")
 		if err != nil {
 			t.Fatalf("DeployMonitoring call %d returned error: %v", i+1, err)
@@ -64,9 +64,9 @@ func TestDeployMonitoringIsIdempotent(t *testing.T) {
 	if err != nil || !found || len(subsets) != 1 {
 		t.Fatalf("Endpoint subsets = %v, found=%t, err=%v", subsets, found, err)
 	}
-	subset := subsets[0].(map[string]interface{})
-	addresses := subset["addresses"].([]interface{})
-	address := addresses[0].(map[string]interface{})
+	subset := subsets[0].(map[string]any)
+	addresses := subset["addresses"].([]any)
+	address := addresses[0].(map[string]any)
 	if address["ip"] != "192.168.40.50" {
 		t.Fatalf("Endpoint IP = %v, want 192.168.40.50", address["ip"])
 	}
