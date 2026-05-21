@@ -21,35 +21,35 @@ import (
 	"errors"
 	"testing"
 
-	dbaasv1 "github.com/wso2/open-cloud-datacenter/crds/dbaas/api/v1alpha1"
 	"github.com/wso2/open-cloud-datacenter/crds/dbaas/internal/harvester"
 )
 
 // TestProbeListenerStubbable proves the seam phaseWaitReady uses to test
 // PostgreSQL readiness can be swapped in tests. Without this, future
-// refactors could accidentally remove the var-indirection and tests would
-// silently start hitting the real ProbeVMListener (which spawns Pods).
+// refactors could accidentally remove the var-indirection and tests
+// would silently start opening real TCP connections via the real
+// DialVMListener.
 func TestProbeListenerStubbable(t *testing.T) {
 	orig := probeListener
 	t.Cleanup(func() { probeListener = orig })
 
 	called := 0
-	probeListener = func(_ *harvester.Client, _ context.Context, _, _, _, _ string, _ int, _ *dbaasv1.NetworkConfig) error {
+	probeListener = func(_ *harvester.Client, _ context.Context, _, _ string, _ int) error {
 		called++
 		return errors.New("refused")
 	}
 
-	if err := probeListener(nil, context.Background(), "ns", "vm", "default/vm-network", "192.168.40.50", 5432, nil); err == nil {
+	if err := probeListener(nil, context.Background(), "ns", "vm", 5432); err == nil {
 		t.Fatalf("stub should return error")
 	}
 	if called != 1 {
 		t.Fatalf("expected stub to be called once, got %d", called)
 	}
 
-	probeListener = func(_ *harvester.Client, _ context.Context, _, _, _, _ string, _ int, _ *dbaasv1.NetworkConfig) error {
+	probeListener = func(_ *harvester.Client, _ context.Context, _, _ string, _ int) error {
 		return nil
 	}
-	if err := probeListener(nil, context.Background(), "ns", "vm", "default/vm-network", "192.168.40.50", 5432, nil); err != nil {
+	if err := probeListener(nil, context.Background(), "ns", "vm", 5432); err != nil {
 		t.Fatalf("stub success path should return nil, got %v", err)
 	}
 }
