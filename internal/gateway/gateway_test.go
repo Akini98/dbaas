@@ -201,8 +201,7 @@ func TestCreateInstance(t *testing.T) {
 	if err := c.Get(context.Background(), types.NamespacedName{Namespace: "some-other-namespace", Name: "orders-2"}, stranded); !apierrors.IsNotFound(err) {
 		t.Fatalf("body namespace was honoured: got err=%v, want NotFound in some-other-namespace", err)
 	}
-	if _ = getInstance(t, c, "orders-2"); false { /* getInstance Fatals on miss */
-	}
+	_ = getInstance(t, c, "orders-2") // Fatals on miss
 }
 
 func TestListInstances(t *testing.T) {

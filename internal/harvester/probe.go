@@ -137,7 +137,7 @@ func (c *Client) ProbeVMListener(
 	// (re-)creating. We poll for actual disappearance because Delete only
 	// initiates termination.
 	_ = pods.Delete(ctx, podName, deleteOpts)
-	for i := 0; i < 25; i++ {
+	for range 25 {
 		if _, gerr := pods.Get(ctx, podName, metav1.GetOptions{}); apierrors.IsNotFound(gerr) {
 			break
 		}

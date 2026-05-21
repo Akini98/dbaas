@@ -29,7 +29,7 @@ import (
 func TestDeployMonitoringIsIdempotent(t *testing.T) {
 	client := NewClient(fake.NewSimpleDynamicClient(runtime.NewScheme()), "https://grafana.example")
 
-	for i := 0; i < 2; i++ {
+	for i := range 2 {
 		svcName, smName, grafanaURL, promTarget, err := client.DeployMonitoring(context.Background(), "orders", "tenant-a", "192.168.40.50")
 		if err != nil {
 			t.Fatalf("DeployMonitoring call %d returned error: %v", i+1, err)

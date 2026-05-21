@@ -127,7 +127,7 @@ func (c *Client) CreateDataVolume(ctx context.Context, id, ns string, sizeGB int
 	dv := newUnstructured("cdi.kubevirt.io/v1beta1", "DataVolume", dvName, ns)
 	dv.SetLabels(map[string]string{dbaasv1.LabelInstance: id, dbaasv1.LabelRole: "pgdata"})
 
-	_ = unstructured.SetNestedMap(dv.Object, map[string]interface{}{}, "spec", "source", "blank")
+	_ = unstructured.SetNestedMap(dv.Object, map[string]any{}, "spec", "source", "blank")
 	_ = unstructured.SetNestedStringSlice(dv.Object, []string{"ReadWriteOnce"}, "spec", "pvc", "accessModes")
 	_ = unstructured.SetNestedField(dv.Object, "Block", "spec", "pvc", "volumeMode")
 	_ = unstructured.SetNestedField(dv.Object, fmt.Sprintf("%dGi", sizeGB), "spec", "pvc", "resources", "requests", "storage")
@@ -176,16 +176,16 @@ func (c *Client) resolveVMImage(ctx context.Context, ref string) (ns, name, sc s
 		if sc == "" {
 			err = fmt.Errorf("VirtualMachineImage %s/%s has no status.storageClassName yet (image not ready)", ns, name)
 		}
-		return
+		return ns, name, sc, err
 	} else if !apierrors.IsNotFound(e) {
 		err = e
-		return
+		return ns, name, sc, err
 	}
 
 	list, e := c.Dynamic.Resource(vmImageGVR).Namespace(ns).List(ctx, metav1.ListOptions{})
 	if e != nil {
 		err = e
-		return
+		return ns, name, sc, err
 	}
 	for _, item := range list.Items {
 		dn, _, _ := unstructured.NestedString(item.Object, "spec", "displayName")
@@ -195,11 +195,11 @@ func (c *Client) resolveVMImage(ctx context.Context, ref string) (ns, name, sc s
 			if sc == "" {
 				err = fmt.Errorf("VirtualMachineImage %s/%s (displayName=%s) has no status.storageClassName yet", ns, name, spec)
 			}
-			return
+			return ns, name, sc, err
 		}
 	}
 	err = fmt.Errorf("no VirtualMachineImage in namespace %s matching name or displayName %q", ns, spec)
-	return
+	return ns, name, sc, err
 }
 
 func (c *Client) CreatePostgresVM(ctx context.Context, p VMCreateParams) (vmName, secretName, caCertPEM string, err error) {
@@ -216,7 +216,7 @@ func (c *Client) CreatePostgresVM(ctx context.Context, p VMCreateParams) (vmName
 	tls, tlsErr := generateTLS(vmName)
 	if tlsErr != nil {
 		err = fmt.Errorf("TLS generation: %w", tlsErr)
-		return
+		return vmName, secretName, caCertPEM, err
 	}
 	caCertPEM = tls.CACertPEM
 
@@ -231,7 +231,7 @@ func (c *Client) CreatePostgresVM(ctx context.Context, p VMCreateParams) (vmName
 	networkData := buildNetworkData(p)
 	secret := newUnstructured("v1", "Secret", secretName, p.Namespace)
 	_ = unstructured.SetNestedField(secret.Object, "Opaque", "type")
-	_ = unstructured.SetNestedField(secret.Object, map[string]interface{}{
+	_ = unstructured.SetNestedField(secret.Object, map[string]any{
 		"admin_user":        p.MasterUser,
 		"admin_password":    adminPw,
 		"repl_password":     replPw,
@@ -245,7 +245,7 @@ func (c *Client) CreatePostgresVM(ctx context.Context, p VMCreateParams) (vmName
 	}, "stringData")
 	if _, e := c.Dynamic.Resource(secretGVR).Namespace(p.Namespace).Create(ctx, secret, metav1.CreateOptions{}); e != nil {
 		if err = ignoreAlreadyExists(e); err != nil {
-			return
+			return vmName, secretName, caCertPEM, err
 		}
 	}
 
@@ -253,7 +253,7 @@ func (c *Client) CreatePostgresVM(ctx context.Context, p VMCreateParams) (vmName
 	// the image-managed StorageClass (no cross-namespace PVC clone, no extra RBAC).
 	imgNs, imgName, imgSC, err := c.resolveVMImage(ctx, p.OSImage)
 	if err != nil {
-		return
+		return vmName, secretName, caCertPEM, err
 	}
 
 	// Build VirtualMachine CR
@@ -441,7 +441,7 @@ func (c *Client) DeployMonitoring(ctx context.Context, id, ns, vmIP string) (svc
 	promTarget = fmt.Sprintf("%s.%s.svc:9187", svcName, ns)
 	if vmIP == "" {
 		err = fmt.Errorf("monitoring endpoint IP is required")
-		return
+		return svcName, smName, grafanaURL, promTarget, err
 	}
 
 	// Headless service. Do not use a selector: the KubeVirt virt-launcher pod
@@ -464,7 +464,7 @@ func (c *Client) DeployMonitoring(ctx context.Context, id, ns, vmIP string) (svc
 		}, "spec", "ports")
 		unstructured.RemoveNestedField(existing.Object, "spec", "selector")
 	}); err != nil {
-		return
+		return svcName, smName, grafanaURL, promTarget, err
 	}
 
 	ep := newUnstructured("v1", "Endpoints", svcName, ns)
@@ -474,7 +474,7 @@ func (c *Client) DeployMonitoring(ctx context.Context, id, ns, vmIP string) (svc
 		existing.SetLabels(ep.GetLabels())
 		_ = unstructured.SetNestedSlice(existing.Object, monitoringEndpointSubsets(vmIP), "subsets")
 	}); err != nil {
-		return
+		return svcName, smName, grafanaURL, promTarget, err
 	}
 
 	// ServiceMonitor
@@ -496,7 +496,7 @@ func (c *Client) DeployMonitoring(ctx context.Context, id, ns, vmIP string) (svc
 		}, "spec", "endpoints")
 	})
 
-	return
+	return svcName, smName, grafanaURL, promTarget, err
 }
 
 // ============================================================
