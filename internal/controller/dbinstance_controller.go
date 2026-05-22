@@ -74,7 +74,7 @@ type DBInstanceReconciler struct {
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;create;delete
 // +kubebuilder:rbac:groups="",resources=services,verbs=get;create;update;delete
 // +kubebuilder:rbac:groups="",resources=endpoints,verbs=get;create;update;delete
-// +kubebuilder:rbac:groups="",resources=pods,verbs=get;create;delete
+// +kubebuilder:rbac:groups="",resources=pods,verbs=get;list
 
 // Reconcile is the main entry point called by controller-runtime.
 func (r *DBInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
