@@ -353,30 +353,28 @@ func (c *Client) GetVMIReadiness(ctx context.Context, ns, vmName string) (VMIRea
 
 	var ip string
 	interfaces, _, _ := unstructured.NestedSlice(vmi.Object, "status", "interfaces")
-	// Prefer data-net (Multus bridge) over mgmt-net (pod masquerade).
-	// KubeVirt lists masquerade first, so we scan all interfaces and pick
-	// data-net explicitly; fall back to the first address if not found.
-	var fallbackIP string
+	// The published endpoint MUST be the data-net (Multus bridge) IP — that's
+	// the only address tenant clients on the VLAN can reach. The mgmt-net
+	// (pod masquerade) IP is controller-only, not reachable from the VLAN,
+	// and changes on every restart, so it must never be returned here.
+	//
+	// We deliberately do NOT fall back to any other interface's address:
+	// after a stop/start, Harvester assigns the data-net IP a few seconds
+	// later than the mgmt-net pod IP, and a fallback would publish the
+	// unreachable pod IP as the endpoint (and it would then stick). If
+	// data-net has no IP yet, return empty so the reconciler keeps waiting.
 	for _, iface := range interfaces {
 		ifMap, ok := iface.(map[string]any)
 		if !ok {
 			continue
 		}
-		addr, _ := ifMap["ipAddress"].(string)
-		if addr == "" {
+		if name, _ := ifMap["name"].(string); name != dataNetInterface {
 			continue
 		}
-		name, _ := ifMap["name"].(string)
-		if name == dataNetInterface {
+		if addr, _ := ifMap["ipAddress"].(string); addr != "" {
 			ip = addr
-			break
 		}
-		if fallbackIP == "" {
-			fallbackIP = addr
-		}
-	}
-	if ip == "" {
-		ip = fallbackIP
+		break
 	}
 
 	return VMIReadiness{Running: running, IP: ip}, nil
