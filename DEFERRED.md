@@ -300,25 +300,21 @@ on top of an engineer already familiar with the codebase.
 
 ### DEF-21 · Probe-pod IP collisions on shared VLANs
 
-- **Status:** Open
-- **Source:** v0.2.10 phaseWaitReady probe-pod design
-- **What:** `phaseWaitReady` confirms postgres is accepting TCP by
-  spawning a one-shot Pod attached to the same Multus NAD as the VM
-  (see `internal/harvester/probe.go`). Because the NAD has no IPAM, the
-  probe pod picks a static neighbor IP — `vmIP` ± 1 in the last octet —
-  for its secondary NIC. If two DBInstances on the same VLAN have
-  addresses that differ by exactly one (e.g., `.50` and `.51`) and their
-  probes overlap in time, one probe's IP will collide with the other
-  VM's real address, causing a transient probe failure and an extra
-  reconcile cycle (the controller will retry). Single-DBInstance or
-  well-spaced address allocations are unaffected.
-- **Done when:** Either (a) the probe pod uses an IPAM-backed NAD
-  (whereabouts / DHCP), (b) the controller allocates probe IPs from an
-  operator-supplied pool, or (c) readiness is signalled out-of-band via
-  cloud-init phone-home to the gateway, removing the L2 dependency
-  entirely.
-- **Effort:** M (option c is the architecturally cleaner path and the
-  one to invest in if probe-pod churn becomes a real concern).
+- **Status:** Resolved — the probe pod was removed entirely.
+- **Source:** v0.2.10 phaseWaitReady probe-pod design.
+- **Resolution:** Each VM now carries a `mgmt-net` NIC on the cluster pod
+  network (KubeVirt masquerade, PostgreSQL port exposed).
+  `phaseWaitReady` confirms the listener by dialing the launcher pod's
+  pod IP directly from the controller process
+  (`internal/harvester/probe.go`, `DialVMListener`) — no probe Pod, no
+  Multus secondary NIC, no neighbor-IP guessing — so the L2 collision
+  class described below can no longer occur.
+- **Original problem (kept for history):** the old `phaseWaitReady`
+  spawned a one-shot Pod on the same NAD and gave its secondary NIC a
+  static neighbor IP (`vmIP` ± 1). Two DBInstances whose addresses
+  differed by exactly one (e.g. `.50` and `.51`) could collide if their
+  probes overlapped in time, causing a transient failure and an extra
+  reconcile cycle.
 
 ## Summary table
 
