@@ -18,10 +18,13 @@ VLAN the operator names.
   background and reflects progress in `status.phase` and
   `status.provisioningPhase`. Callers poll the CR (or `GET /dbinstances/{name}`)
   for state.
-- **Single-NIC VM, single VLAN.** The VM has one network interface, bridged
-  onto whatever Multus `NetworkAttachmentDefinition` the operator names in
-  `spec.networkRef`. Client traffic, `apt` during cloud-init, and Prometheus
-  scraping all flow through that one VLAN.
+- **Dual-NIC VM.** Each VM has two interfaces: `data-net`, bridged onto the
+  Multus `NetworkAttachmentDefinition` named in `spec.networkRef` — the
+  tenant-facing address, published as `status.endpoint.address`; and
+  `mgmt-net`, on the cluster's pod network (KubeVirt masquerade, PostgreSQL
+  port exposed). The controller dials the launcher pod's `mgmt-net` IP to
+  confirm readiness, and that NIC also carries the VM's egress during
+  cloud-init. Only `data-net` is ever published as the endpoint.
 
 ## Architecture
 
@@ -201,10 +204,12 @@ controller restart.
    VMCreated                  TLS bundle, credentials Secret, KubeVirt VM
           │                   "pg-{id}". Requeue after 10s.
           ▼
-   WaitingForCloudInit        Poll VMI: must be Running + have an IP +
-          │                   uptime > 3 min (heuristic for cloud-init done).
+   WaitingForCloudInit        VMI Running + data-net IP assigned, then dial
+          │                   PostgreSQL on the launcher pod's mgmt-net IP to
+          │                   confirm the listener is actually accepting TCP.
           ▼
-   DatabaseReady              status.endpoint populated, JDBC URL emitted.
+   DatabaseReady              status.endpoint populated (data-net IP),
+          │                   JDBC URL emitted.
           │
           ▼
    MonitoringDeployed         Headless Service + Prometheus ServiceMonitor.
@@ -270,10 +275,12 @@ cleanup.
 │                                            spec.allocatedStorage)│
 │   cloudinit      Secret "pg-{id}-credentials" (userdata key)    │
 │                                                                 │
-│   NIC                                                           │
+│   NICs                                                          │
 │   ──────────                                                    │
-│   data-net       Multus bridge -> spec.networkRef NAD           │
-│                  (DHCP, matched on driver=virtio_net)           │
+│   data-net (enp1s0)  Multus bridge -> spec.networkRef NAD;      │
+│                      tenant-facing; DHCP/IPAM or staticNetwork  │
+│   mgmt-net (enp2s0)  pod network, KubeVirt masquerade;          │
+│                      controller dials :port; VM egress at boot  │
 │                                                                 │
 │   PostgreSQL                                                    │
 │   ──────────                                                    │
@@ -283,11 +290,14 @@ cleanup.
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-That is intentionally the *whole* network model in this version. There is no
-pod-network management NIC, no Kube-OVN VPC, no VPC peering. If the database
-needs to be reachable from a particular set of workloads, the operator
-configures that by pointing `spec.networkRef` at the right VLAN — for
-example, the VLAN where the Rancher/RKE2 cluster lives.
+That is intentionally the *whole* network model in this version: the
+tenant-facing `data-net` VLAN plus the control-plane `mgmt-net` pod NIC.
+There is no Kube-OVN VPC and no VPC peering. If the database needs to be
+reachable from a particular set of workloads, the operator configures that
+by pointing `spec.networkRef` at the right VLAN — for example, the VLAN
+where the Rancher/RKE2 cluster lives. The `mgmt-net` NIC is control-plane
+only (readiness probe + first-boot egress) and is never advertised to
+tenants.
 
 ## Cloud-init bootstrap
 
@@ -297,8 +307,11 @@ first boot the VM:
 
 1. Installs `postgresql`, `postgresql-contrib`, `jq`, `qemu-guest-agent` via
    `apt` (over the VLAN — that VLAN must reach upstream package mirrors).
-2. Writes `/etc/netplan/60-data-net.yaml` matching on `driver: virtio_net`,
-   so DHCP runs regardless of how the kernel names the NIC.
+2. Applies cloud-init `networkData` for both NICs: `enp1s0` (data-net) via
+   DHCP/IPAM or the static config from `spec.staticNetwork`, and `enp2s0`
+   (mgmt-net) via DHCP from KubeVirt's masquerade. Delivered through the
+   `networkData` channel at `init-local` (not `write_files`), so addresses
+   are up before networkd's wait-online times out.
 3. Writes `/etc/dbaas/bootstrap.env` (credentials, port, max connections,
    LUKS key, optional S3 backup config) and `/etc/dbaas/bootstrap.sh`.
 4. Drops the per-instance CA + server cert under `/etc/ssl/{certs,private}/`.
@@ -351,8 +364,10 @@ you don't go looking for the code:
 
 - **No Kube-OVN VPC / Subnet / VpcPeering.** The reconciler does not create or
   peer networks. `spec.networkRef` is the *only* network model.
-- **No second management NIC.** Removed along with `spec.consumerNetwork`. The
-  VM has one interface and that VLAN carries everything.
+- **No user-configurable extra networks.** `spec.consumerNetwork` was
+  removed. The VM has exactly two NICs — the tenant `data-net` and the
+  control-plane `mgmt-net` (see *Network model*); there is no third,
+  user-supplied network.
 - **No `DBSnapshot` / `DBParameterGroup` CRDs** yet (the reference repo has
   them; this module has only `DBInstance`).
 - **No `multiAZ` / Patroni HA** — the field exists in the spec but the

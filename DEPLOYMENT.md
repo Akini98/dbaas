@@ -69,10 +69,11 @@ guide. This file is the picture in between — what shape everything takes after
 │  ║                    │  userdata    → packages, bootstrap.sh, certs  ║     │
 │  ║                    │  networkdata → static IP applied init-local   ║     │
 │  ║                                                                    ║     │
-│  ║   Single NIC "data-net"                                            ║     │
+│  ║   NIC 1 "data-net" (enp1s0)  — tenant-facing, the endpoint        ║     │
 │  ║     Multus bridge → NAD default/vm-network (bridge cn-vm-br)       ║     │
-│  ║     static 192.168.40.50/24   gw 192.168.40.1                      ║     │
-│  ║     dns 8.8.8.8, 1.1.1.1                                           ║     │
+│  ║     static 192.168.40.50/24   gw 192.168.40.1   dns 8.8.8.8       ║     │
+│  ║   NIC 2 "mgmt-net" (enp2s0)  — pod net, KubeVirt masquerade       ║     │
+│  ║     controller dials this pod IP :5432 for readiness + egress     ║     │
 │  ╚═══════════════════════════════════╤══════════════════════════════╝     │
 │                                       │                                    │
 │  ══════════════════════════════════ VLAN 400 (192.168.40.0/24) ═══════════│
@@ -111,14 +112,17 @@ Top to bottom, four layers:
    (VM, VMI, two DataVolumes, the credentials Secret, the metrics Service,
    the ServiceMonitor). All discoverable with one label query:
    `kubectl -n <ns> get vm,vmi,dv,secret,svc,servicemonitor -l dbaas.opencloud.wso2.com/instance=<name>`.
-4. **The VM itself** — single NIC bridged to the operator-supplied Multus
-   NAD (here `default/vm-network`, which is Harvester VLAN 400 via bridge
-   `cn-vm-br`). Cloud-init delivers two things at boot: the static
-   `networkData` applied at `init-local` (so networkd doesn't time out),
-   and the `userdata` shell bootstrap that `apt install`s PostgreSQL and
-   enables `qemu-guest-agent`. Once the agent registers, the VMI's
-   `status.interfaces[].ipAddress` populates and the reconciler advances
-   to `Available`.
+4. **The VM itself** — two NICs. `data-net` (enp1s0) bridges to the
+   operator-supplied Multus NAD (here `default/vm-network`, Harvester
+   VLAN 400 via bridge `cn-vm-br`) and is the tenant-facing endpoint;
+   `mgmt-net` (enp2s0) sits on the cluster pod network (KubeVirt
+   masquerade) for the controller's readiness dial and first-boot egress.
+   Cloud-init delivers `networkData` (both NICs) at `init-local` so
+   networkd doesn't time out, plus the `userdata` shell bootstrap that
+   `apt install`s PostgreSQL and enables `qemu-guest-agent`. Once the
+   data-net IP populates in `status.interfaces[].ipAddress` and the
+   controller's dial to the mgmt-net IP succeeds, the reconciler advances
+   to `Available` — publishing the **data-net** IP as the endpoint.
 
 ## What had to be true on the cluster
 
@@ -127,8 +131,8 @@ operator has to satisfy:
 
 | Prereq | Why | How to satisfy |
 | --- | --- | --- |
-| Multus NAD on the target VLAN | The VM bridges to it as its only NIC. | Created in Harvester UI under **Networks → VM Networks**. NAD ends up in `default` (or `harvester-public`). Tell the `DBInstance` about it via `spec.networkRef: <ns>/<nad-name>`. |
-| The VLAN routes to the internet | Cloud-init `apt install`s postgresql from the upstream Ubuntu mirrors during first boot. | Have an upstream router/gateway on the VLAN. We empirically verified `curl https://archive.ubuntu.com → 200` from a probe pod on the same VLAN before the test. |
+| Multus NAD on the target VLAN | The VM bridges to it as its tenant-facing NIC (`data-net`). | Created in Harvester UI under **Networks → VM Networks**. NAD ends up in `default` (or `harvester-public`). Tell the `DBInstance` about it via `spec.networkRef: <ns>/<nad-name>`. |
+| Cluster pod-network egress to package mirrors | Cloud-init `apt install`s postgresql on first boot. Egress goes via the `mgmt-net` pod NIC, so the **data VLAN no longer needs its own internet route**. | The cluster's normal pod egress must reach the Ubuntu mirrors (true on any cluster whose pods can pull images / reach the internet). |
 | A `VirtualMachineImage` for the OS | The VM's OS DataVolume is cloned from it via the image-managed StorageClass. | Created in Harvester UI under **Images** (upload or URL). Reference it from `spec.osImage` by either the CR name (`<ns>/<name>`) or the displayName. We downloaded the stock Ubuntu 24.04 noble cloudimg. |
 | A static IP on the VLAN (only if no DHCP) | The reconciler doesn't run an IPAM; it just hands what's in `spec.staticNetwork` to cloud-init. | Pick a free IP, gateway, DNS resolvers; set `spec.staticNetwork`. Omit if the VLAN has a working DHCP server. |
 | `kubectl` access to the cluster | Standard kubebuilder install / deploy targets use the active kubeconfig. | Harvester UI → **Support → Download KubeConfig**. |
@@ -196,4 +200,6 @@ Expected time from `apply` to `phase=available`: about **3 minutes**
 (image clone + boot + apt install + the 3-min uptime gate). End-to-end
 proof on Harvester 1.7.1 in this branch's most recent test was a full SQL
 roundtrip: `CREATE TABLE` → `INSERT` → `SELECT` of the inserted row, run
-from a probe pod attached to the same NAD.
+from a test client pod attached to the same NAD. (This is a manual test
+client — the controller itself confirms readiness by dialing the VM's
+mgmt-net pod IP, not via any pod.)
