@@ -246,6 +246,7 @@ func (r *DBInstanceReconciler) phaseVM(ctx context.Context, inst *dbaasv1.DBInst
 		S3Config:       inst.Spec.S3BackupConfig,
 		VMPassword:     inst.Spec.VMPassword,
 		StaticNetwork:  inst.Spec.StaticNetwork,
+		DNSServerIP:    inst.Spec.DNSServerIP,
 	})
 	if err != nil {
 		return r.fail(ctx, inst, "VMCreateFailed", err)
