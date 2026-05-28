@@ -64,6 +64,7 @@ func main() {
 	var probeAddr string
 	var gatewayAddr string
 	var grafanaURL string
+	var mgmtLogicalSwitch string
 	var secureMetrics bool
 	var enableHTTP2 bool
 	var tlsOpts []func(*tls.Config)
@@ -74,6 +75,10 @@ func main() {
 		"The address the DBInstance REST API gateway binds to.")
 	flag.StringVar(&grafanaURL, "grafana-url", "https://grafana.monitoring.svc",
 		"Base URL of the cluster Grafana instance, used to render per-DBInstance dashboard links.")
+	flag.StringVar(&mgmtLogicalSwitch, "mgmt-logical-switch", "ovn-default",
+		"Kube-OVN logical switch to pin DB VM launcher pods' default (mgmt-net) network to, "+
+			"so the controller can reach the readiness probe across tenant VPCs. "+
+			"Empty disables the annotation (non-OVN clusters).")
 	flag.BoolVar(&enableLeaderElection, "leader-elect", false,
 		"Enable leader election for controller manager. "+
 			"Enabling this will ensure there is only one active controller manager.")
@@ -174,6 +179,7 @@ func main() {
 		os.Exit(1)
 	}
 	hvClient := harvester.NewClient(dynClient, grafanaURL)
+	hvClient.MgmtLogicalSwitch = mgmtLogicalSwitch
 
 	mgr, err := ctrl.NewManager(restConfig, ctrl.Options{
 		Scheme:                 scheme,

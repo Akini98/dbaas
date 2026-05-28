@@ -88,6 +88,16 @@ const (
 type Client struct {
 	Dynamic    dynamic.Interface
 	GrafanaURL string
+	// MgmtLogicalSwitch, when non-empty, is stamped onto the VM launcher pod
+	// as the `ovn.kubernetes.io/logical_switch` annotation. On a Kube-OVN
+	// cluster this keeps the launcher pod's DEFAULT network (and therefore the
+	// mgmt-net masquerade NIC the controller probes) on a shared,
+	// controller-reachable subnet (e.g. "ovn-default") instead of inheriting
+	// the project namespace's tenant-VPC default — which is isolated and
+	// unreachable from the controller. The data-net NIC still attaches to the
+	// tenant subnet via Multus. Empty = don't set the annotation (correct for
+	// non-OVN clusters and for unit tests). See DialVMListener.
+	MgmtLogicalSwitch string
 }
 
 func NewClient(dyn dynamic.Interface, grafanaURL string) *Client {
@@ -115,6 +125,12 @@ type VMCreateParams struct {
 	// static IPv4 config instead of DHCP. Used on VLANs without a DHCP
 	// server.
 	StaticNetwork *dbaasv1.NetworkConfig
+	// DNSServerIP, when non-empty, pins the VM's resolver via KubeVirt
+	// dnsPolicy=None + dnsConfig.nameservers. Required on Kube-OVN VPC
+	// subnets to defeat the virt-launcher internal-DHCP DNS race (it would
+	// otherwise inject unreachable cluster DNS, breaking apt during
+	// cloud-init). Supplied by the control plane (per-VPC CoreDNS address).
+	DNSServerIP string
 }
 
 // VMIReadiness bundles phase + IP from a single VMI fetch. The IP being
@@ -268,6 +284,16 @@ func (c *Client) CreatePostgresVM(ctx context.Context, p VMCreateParams) (vmName
 	vm := newUnstructured("kubevirt.io/v1", "VirtualMachine", vmName, p.Namespace)
 	vm.SetLabels(map[string]string{dbaasv1.LabelInstance: p.ID, dbaasv1.LabelRole: "primary"})
 
+	// Pod-template annotations. On Kube-OVN clusters, pinning the launcher
+	// pod's logical switch keeps its DEFAULT network (the mgmt-net masquerade
+	// NIC the controller dials) on a shared, reachable subnet rather than the
+	// project namespace's isolated tenant-VPC default. Empty MgmtLogicalSwitch
+	// → no annotation (non-OVN clusters, tests). See Client.MgmtLogicalSwitch.
+	templateAnnotations := map[string]any{}
+	if c.MgmtLogicalSwitch != "" {
+		templateAnnotations["ovn.kubernetes.io/logical_switch"] = c.MgmtLogicalSwitch
+	}
+
 	spec := map[string]any{
 		"running": true,
 		"dataVolumeTemplates": []any{
@@ -297,7 +323,8 @@ func (c *Client) CreatePostgresVM(ctx context.Context, p VMCreateParams) (vmName
 		},
 		"template": map[string]any{
 			"metadata": map[string]any{
-				"labels": map[string]any{dbaasv1.LabelInstance: p.ID},
+				"labels":      map[string]any{dbaasv1.LabelInstance: p.ID},
+				"annotations": templateAnnotations,
 			},
 			"spec": map[string]any{
 				"domain": map[string]any{
@@ -333,6 +360,22 @@ func (c *Client) CreatePostgresVM(ctx context.Context, p VMCreateParams) (vmName
 			},
 		},
 	}
+	// DNS pinning (Kube-OVN VPC subnets). Without this, KubeVirt's bridge-mode
+	// virt-launcher internal DHCP server copies the launcher pod's cluster
+	// resolv.conf into the VM, overriding what OVN's DHCP advertises — the VM
+	// then can't resolve the apt archive and cloud-init's postgres install
+	// fails. dnsPolicy=None + dnsConfig.nameservers=[per-VPC CoreDNS] silences
+	// it. Empty DNSServerIP (cluster-routable VLANs) keeps KubeVirt's default.
+	if p.DNSServerIP != "" {
+		dnsIP := p.DNSServerIP
+		if i := strings.Index(dnsIP, "/"); i > 0 { // strip any CIDR suffix (INET → "x.x.x.x/32")
+			dnsIP = dnsIP[:i]
+		}
+		tmplSpec := spec["template"].(map[string]any)["spec"].(map[string]any)
+		tmplSpec["dnsPolicy"] = "None"
+		tmplSpec["dnsConfig"] = map[string]any{"nameservers": []any{dnsIP}}
+	}
+
 	_ = unstructured.SetNestedField(vm.Object, spec, "spec")
 
 	if _, e := c.Dynamic.Resource(vmGVR).Namespace(p.Namespace).Create(ctx, vm, metav1.CreateOptions{}); e != nil {
